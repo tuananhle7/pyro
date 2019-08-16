@@ -22,15 +22,26 @@ class Gaussian:
         ``info_vec = precision @ mean``. We use this represention to make gaussian contraction
         fast and stable.
     :param torch.Tensor precision: precision matrix of this gaussian.
+    :param float jitter: a factor of ``finfo.eps`` that is added to the
+        precision diagonal for numerical stability..
     """
-    def __init__(self, log_normalizer, info_vec, precision):
+    def __init__(self, log_normalizer, info_vec, precision, jitter=10.):
         # NB: using info_vec instead of mean to deal with rank-deficient problem
         assert info_vec.dim() >= 1
         assert precision.dim() >= 2
         assert precision.shape[-2:] == info_vec.shape[-1:] * 2
+        assert isinstance(jitter, (float, int)) and jitter >= 0
         self.log_normalizer = log_normalizer
         self.info_vec = info_vec
         self.precision = precision
+
+        if jitter > 0 and self.precision.numel():
+            self.precision = self.precision.contiguous()
+            p = self.precision.data
+            n = p.size(-1)
+            p = p.view(p.shape[:-2] + (n * n,))
+            diag = jitter * torch.finfo(p.dtype).eps * p.abs().max(-1, keepdim=True)[0]
+            p.data[..., ::n + 1] += diag
 
     def dim(self):
         return self.info_vec.size(-1)
@@ -46,14 +57,14 @@ class Gaussian:
         log_normalizer = self.log_normalizer.expand(batch_shape)
         info_vec = self.info_vec.expand(batch_shape + (n,))
         precision = self.precision.expand(batch_shape + (n, n))
-        return Gaussian(log_normalizer, info_vec, precision)
+        return Gaussian(log_normalizer, info_vec, precision, jitter=0)
 
     def reshape(self, batch_shape):
         n = self.dim()
         log_normalizer = self.log_normalizer.reshape(batch_shape)
         info_vec = self.info_vec.reshape(batch_shape + (n,))
         precision = self.precision.reshape(batch_shape + (n, n))
-        return Gaussian(log_normalizer, info_vec, precision)
+        return Gaussian(log_normalizer, info_vec, precision, jitter=0)
 
     def __getitem__(self, index):
         """
@@ -63,7 +74,7 @@ class Gaussian:
         log_normalizer = self.log_normalizer[index]
         info_vec = self.info_vec[index + (slice(None),)]
         precision = self.precision[index + (slice(None), slice(None))]
-        return Gaussian(log_normalizer, info_vec, precision)
+        return Gaussian(log_normalizer, info_vec, precision, jitter=0)
 
     @staticmethod
     def cat(parts, dim=0):
@@ -74,7 +85,7 @@ class Gaussian:
             dim += len(parts[0].batch_shape)
         args = [torch.cat([getattr(g, attr) for g in parts], dim=dim)
                 for attr in ["log_normalizer", "info_vec", "precision"]]
-        return Gaussian(*args)
+        return Gaussian(*args, jitter=0)
 
     def event_pad(self, left=0, right=0):
         """
@@ -84,7 +95,7 @@ class Gaussian:
         log_normalizer = self.log_normalizer
         info_vec = pad(self.info_vec, lr)
         precision = pad(self.precision, lr + lr)
-        return Gaussian(log_normalizer, info_vec, precision)
+        return Gaussian(log_normalizer, info_vec, precision, jitter=0)
 
     def event_permute(self, perm):
         """
@@ -94,7 +105,7 @@ class Gaussian:
         assert perm.shape == (self.dim(),)
         info_vec = self.info_vec[..., perm]
         precision = self.precision[..., perm][..., perm, :]
-        return Gaussian(self.log_normalizer, info_vec, precision)
+        return Gaussian(self.log_normalizer, info_vec, precision, jitter=0)
 
     def __add__(self, other):
         """
@@ -104,7 +115,7 @@ class Gaussian:
         assert self.dim() == other.dim()
         return Gaussian(self.log_normalizer + other.log_normalizer,
                         self.info_vec + other.info_vec,
-                        self.precision + other.precision)
+                        self.precision + other.precision, jitter=0)
 
     def log_density(self, value):
         """
@@ -153,7 +164,7 @@ class Gaussian:
         log_normalizer = (self.log_normalizer +
                           -0.5 * P_bb.matmul(b.unsqueeze(-1)).squeeze(-1).mul(b).sum(-1) +
                           b.mul(info_b).sum(-1))
-        return Gaussian(log_normalizer, info_vec, precision)
+        return Gaussian(log_normalizer, info_vec, precision, jitter=0)
 
     def marginalize(self, left=0, right=0):
         """
@@ -295,12 +306,13 @@ def matrix_and_mvn_to_gaussian(matrix, mvn):
 
     y_gaussian = mvn_to_gaussian(mvn)
     P_yy = y_gaussian.precision
-    neg_P_xy = matrix.matmul(P_yy)
-    P_xy = -neg_P_xy
+    P_xy = -matrix.matmul(P_yy)
     P_yx = P_xy.transpose(-1, -2)
-    P_xx = neg_P_xy.matmul(matrix.transpose(-1, -2))
+    P_x = matrix.transpose(-1, -2).triangular_solve(mvn.scale_tril, upper=False).solution
+    P_xx = P_x.transpose(-1, -2).matmul(P_x)
     precision = torch.cat([torch.cat([P_xx, P_xy], -1),
                            torch.cat([P_yx, P_yy], -1)], -2)
+
     info_y = y_gaussian.info_vec
     info_x = -matrix.matmul(info_y.unsqueeze(-1)).squeeze(-1)
     info_vec = torch.cat([info_x, info_y], -1)
