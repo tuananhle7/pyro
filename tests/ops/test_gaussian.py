@@ -313,3 +313,31 @@ def test_gaussian_tensordot(dot_dims,
     # TODO(fehiepsi): find some condition to make this test stable, so we can compare large value
     # log densities.
     assert_close(actual.clamp(max=10.), expect.clamp(max=10.), atol=0.1, rtol=0.1)
+
+
+@pytest.mark.parametrize("batch_shape", [(), (4,), (3, 2)], ids=str)
+@pytest.mark.parametrize("dim", [1, 2, 3])
+def test_gaussian_tensordot_precision(batch_shape, dim):
+    g_ab = random_gaussian(batch_shape, 2 * dim)
+    g_bc = random_gaussian(batch_shape, 2 * dim)
+    g_ac = gaussian_tensordot(g_ab, g_bc, dim)
+
+    p_ab = g_ab.precision
+    p_bc = g_bc.precision
+    p_abc = pad(p_ab, (0, dim, 0, dim)) + pad(p_bc, (dim, 0, dim, 0))
+    c_abc = p_abc.inverse()
+    c_ac = torch.cat([torch.cat([c_abc[..., :dim, :dim], c_abc[..., :dim, -dim:]], dim=-1),
+                      torch.cat([c_abc[..., -dim:, :dim], c_abc[..., -dim:, -dim:]], dim=-1)], dim=-2)
+    p_ac = c_ac.inverse()
+    assert_close(g_ac.precision, p_ac)
+
+
+@pytest.mark.parametrize("batch_shape", [(), (4,), (3, 2)], ids=str)
+@pytest.mark.parametrize("dim", [1, 2, 3])
+def test_gaussian_tensordot_associative(batch_shape, dim):
+    p = random_gaussian(batch_shape, 2 * dim)
+    q = random_gaussian(batch_shape, 2 * dim)
+    r = random_gaussian(batch_shape, 2 * dim)
+    pq_r = gaussian_tensordot(gaussian_tensordot(p, q, dim), r, dim)
+    p_qr = gaussian_tensordot(p, gaussian_tensordot(q, r, dim), dim)
+    assert_close_gaussian(pq_r, p_qr)

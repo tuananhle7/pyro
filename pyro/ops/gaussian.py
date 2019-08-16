@@ -23,18 +23,22 @@ class Gaussian:
         fast and stable.
     :param torch.Tensor precision: precision matrix of this gaussian.
     :param float jitter: a factor of ``finfo.eps`` that is added to the
-        precision diagonal for numerical stability..
+        precision diagonal for numerical stability.
     """
-    def __init__(self, log_normalizer, info_vec, precision, jitter=10.):
+    jitter = 1e3
+
+    def __init__(self, log_normalizer, info_vec, precision, jitter=None):
         # NB: using info_vec instead of mean to deal with rank-deficient problem
         assert info_vec.dim() >= 1
         assert precision.dim() >= 2
         assert precision.shape[-2:] == info_vec.shape[-1:] * 2
-        assert isinstance(jitter, (float, int)) and jitter >= 0
+        assert jitter is None or (isinstance(jitter, (float, int)) and jitter >= 0)
         self.log_normalizer = log_normalizer
         self.info_vec = info_vec
         self.precision = precision
 
+        if jitter is None:
+            jitter = self.jitter
         if jitter > 0 and self.precision.numel():
             self.precision = self.precision.contiguous()
             p = self.precision.data
