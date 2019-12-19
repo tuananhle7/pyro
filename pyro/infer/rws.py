@@ -11,6 +11,52 @@ from pyro.poutine.util import prune_subsample_sites
 from pyro.util import check_if_enumerated, check_model_guide_match, warn_if_nan
 
 
+def contains_data_batch_dim(site, data_batch_plate):
+    for cond_indep_stack_frame in site['cond_indep_stack']:
+        if cond_indep_stack_frame.name == data_batch_plate:
+            return True
+    return False
+
+
+def sum_except_first_n_dims(x, n):
+    dim = tuple(range(-1, -x.ndim + n - 1, -1))
+    return torch.sum(x, dim=dim)
+
+
+def get_log_prob_site(site, vectorize_particles, data_batch_plate):
+    if vectorize_particles:
+        # contains num_particles dim
+        if contains_data_batch_dim(site, data_batch_plate):
+            # sum everything out except the first two dims
+            # left with [num_particles, batch_size]
+            num_dims_to_keep = 2
+        else:
+            # sum everything out except the first dim
+            # left with [num_particles]
+            num_dims_to_keep = 1
+    else:
+        # doesn't contain num_particles dim
+        if contains_data_batch_dim(site, data_batch_plate):
+            # sum everything out except the first dim
+            # left with [batch_size]
+            num_dims_to_keep = 1
+        else:
+            # sum all dims out
+            # left with []
+            num_dims_to_keep = 0
+    return sum_except_first_n_dims(site["log_prob"], num_dims_to_keep)
+
+
+def check_data_batch_plate(site, data_batch_plate):
+    # TODO
+    if (
+        (data_batch_plate is not None) and
+        (not contains_data_batch_dim(site, data_batch_plate))
+    ):
+        # raise error
+        pass
+
+
 class ReweightedWakeSleep(ELBO):
     r"""
     An implementation of Reweighted Wake Sleep following reference [1].
@@ -55,6 +101,9 @@ class ReweightedWakeSleep(ELBO):
         Matches `num_particles` by default.
     :param bool vectorize_particles: Whether the traces should be vectorised
         across `num_particles`. Default is True.
+    :param string data_batch_plate: Name of the plate over data. The final objective is the average
+        of objectives over objectives computed over data inside this plate. This must be the outermost
+        plate.
     :param int max_plate_nesting: Bound on max number of nested
         :func:`pyro.plate` contexts. Default is infinity.
     :param bool strict_enumeration_warning: Whether to warn about possible
@@ -77,6 +126,7 @@ class ReweightedWakeSleep(ELBO):
                  model_has_params=True,
                  num_sleep_particles=None,
                  vectorize_particles=True,
+                 data_batch_plate=None,
                  max_plate_nesting=float('inf'),
                  strict_enumeration_warning=True):
         # force K > 1 otherwise SNIS not possible
@@ -90,6 +140,7 @@ class ReweightedWakeSleep(ELBO):
         self.insomnia = insomnia
         self.model_has_params = model_has_params
         self.num_sleep_particles = num_particles if num_sleep_particles is None else num_sleep_particles
+        self.data_batch_plate = data_batch_plate
 
         assert(insomnia >= 0 and insomnia <= 1), \
             "insomnia should be in [0, 1]"
@@ -126,36 +177,70 @@ class ReweightedWakeSleep(ELBO):
 
                 for _, site in model_trace.nodes.items():
                     if site["type"] == "sample":
-                        if self.vectorize_particles:
-                            log_p_site = site["log_prob"].reshape(self.num_particles, -1).sum(-1)
-                        else:
-                            log_p_site = site["log_prob_sum"]
+                        check_data_batch_plate(site, self.data_batch_plate)
+                        log_p_site = get_log_prob_site(site, self.vectorize_particles, self.data_batch_plate)
                         log_joint = log_joint + log_p_site
 
                 for _, site in guide_trace.nodes.items():
                     if site["type"] == "sample":
-                        if self.vectorize_particles:
-                            log_q_site = site["log_prob"].reshape(self.num_particles, -1).sum(-1)
-                        else:
-                            log_q_site = site["log_prob_sum"]
+                        check_data_batch_plate(site, self.data_batch_plate)
+                        log_q_site = get_log_prob_site(site, self.vectorize_particles, self.data_batch_plate)
                         log_q = log_q + log_q_site
 
                 log_joints.append(log_joint)
                 log_qs.append(log_q)
 
-            log_joints = log_joints[0] if self.vectorize_particles else torch.stack(log_joints)
-            log_qs = log_qs[0] if self.vectorize_particles else torch.stack(log_qs)
+            if self.vectorize_particles:
+                # contains num_particles dim
+                if self.data_batch_plate is not None:
+                    # log_joints and log_qs
+                    # list of [num_particles, batch_size] of length 1
+                    log_joints = log_joints[0]
+                    log_qs = log_qs[0]
+                else:
+                    # log_joints and log_qs
+                    # list of [num_particles] of length 1
+                    log_joints = log_joints[0]
+                    log_qs = log_qs[0]
+            else:
+                # doesn't contain num_particles dim
+                if self.data_batch_plate is not None:
+                    # log_joints and log_qs
+                    # list of [batch_size] of length num_particles
+                    log_joints = torch.stack(log_joints)
+                    log_qs = torch.stack(log_qs)
+                else:
+                    # log_joints and log_qs
+                    # list of [] of length num_particles
+                    log_joints = torch.stack(log_joints)
+                    log_qs = torch.stack(log_qs)
+
+            # log_joints and log_qs
+            # [num_particles, batch_size] or [num_particles]
             log_weights = log_joints - log_qs.detach()
 
             # compute wake theta loss
             log_sum_weight = torch.logsumexp(log_weights, dim=0)
-            wake_theta_loss = -(log_sum_weight - math.log(self.num_particles)).sum()
+            wake_theta_loss = log_sum_weight - math.log(self.num_particles)
+            if self.data_batch_plate is not None:
+                # log_joints and log_qs
+                # [num_particles, batch_size]
+                wake_theta_loss = -torch.mean(wake_theta_loss)
+            else:
+                # log_joints and log_qs
+                # [num_particles]
+                wake_theta_loss = -wake_theta_loss
             warn_if_nan(wake_theta_loss, "wake theta loss")
-
         if self.insomnia > 0:
             # compute wake phi loss
+            # log_weights
+            # [num_particles, batch_size] or [num_particles]
             normalised_weights = (log_weights - log_sum_weight).exp().detach()
-            wake_phi_loss = -(normalised_weights * log_qs).sum()
+            wake_phi_loss = torch.sum(normalised_weights * log_qs, dim=0)
+            if self.data_batch_plate is not None:
+                wake_phi_loss = -torch.mean(wake_phi_loss)
+            else:
+                wake_phi_loss = -wake_phi_loss
             warn_if_nan(wake_phi_loss, "wake phi loss")
 
         if self.insomnia < 1:
