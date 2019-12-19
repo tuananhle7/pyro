@@ -20,7 +20,10 @@ def contains_data_batch_dim(site, data_batch_plate):
 
 def sum_except_first_n_dims(x, n):
     dim = tuple(range(-1, -x.ndim + n - 1, -1))
-    return torch.sum(x, dim=dim)
+    if len(dim) == 0:
+        return x
+    else:
+        return torch.sum(x, dim=dim)
 
 
 def get_log_prob_site(site, vectorize_particles, data_batch_plate):

@@ -47,6 +47,7 @@ if __name__ == '__main__':
                          optim=pyro.optim.Adam({'lr': 0.1}),
                          loss=pyro.infer.ReweightedWakeSleep(num_particles=num_particles,
                                                              vectorize_particles=vectorize,
+                                                             data_batch_plate='obss',
                                                              insomnia=1.))
 
     theta_losses, phi_losses, guesses, q_loc_mult, q_loc_add, q_log_scale = [], [], [], [], [], []
