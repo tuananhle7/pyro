@@ -15,8 +15,8 @@ def scale(guess_init, guess_scale, obs_scale, observations=None):
     guess_loc = pyro.param('guess', torch.tensor(guess_init))
     for i in pyro.plate('obss', len(obss)):
         weight = pyro.sample('weight_{}'.format(i), dist.Normal(guess_loc, guess_scale))
-        return pyro.sample('measurement_{}'.format(i), dist.Normal(weight, obs_scale),
-                           obs=torch.tensor(obss[i]))
+        pyro.sample('measurement_{}'.format(i), dist.Normal(weight, obs_scale),
+                    obs=torch.tensor(obss[i]))
 
 
 def scale_parametrized_guide(guess_init, guess_scale, obs_scale, observations=None):
@@ -25,8 +25,8 @@ def scale_parametrized_guide(guess_init, guess_scale, obs_scale, observations=No
     loc_add = pyro.param('loc_add', torch.tensor(0.))
     log_scale = pyro.param('log_scale', torch.tensor(0.))
     for i in pyro.plate('obss', len(obss)):
-        return pyro.sample('weight_{}'.format(i), dist.Normal(loc_mult * obss[i] + loc_add,
-                                                              torch.exp(log_scale)))
+        pyro.sample('weight_{}'.format(i), dist.Normal(loc_mult * obss[i] + loc_add,
+                    torch.exp(log_scale)))
 
 
 if __name__ == '__main__':
