@@ -156,33 +156,29 @@ class ReweightedWakeSleep(ELBO):
                 log_joints = torch.zeros(self.num_particles, batch_size, dtype=dtype, device=device)
                 log_qs = torch.zeros(self.num_particles, batch_size, dtype=dtype, device=device)
 
-                if data_batch_plate_mode == 'with':
-                    for i, (model_trace, guide_trace) in enumerate(self._get_traces(model, guide, args, kwargs)):
-                        for _, site in model_trace.nodes.items():
-                            if site["type"] == "sample":
+                for i, (model_trace, guide_trace) in enumerate(self._get_traces(model, guide, args, kwargs)):
+                    for _, site in model_trace.nodes.items():
+                        if site["type"] == "sample":
+                            if data_batch_plate_mode == 'with':
                                 if self.vectorize_particles:
                                     log_joints = log_joints + sum_except_first_n_dims(site['log_prob'], 2)
                                 else:
                                     log_joints[i] = log_joints[i] + sum_except_first_n_dims(site['log_prob'], 1)
-
-                        for _, site in guide_trace.nodes.items():
-                            if site["type"] == "sample":
-                                if self.vectorize_particles:
-                                    log_qs = log_qs + sum_except_first_n_dims(site['log_prob'], 2)
-                                else:
-                                    log_qs[i] = log_qs[i] + sum_except_first_n_dims(site['log_prob'], 1)
-                elif data_batch_plate_mode == 'for':
-                    for i, (model_trace, guide_trace) in enumerate(self._get_traces(model, guide, args, kwargs)):
-                        for _, site in model_trace.nodes.items():
-                            if site["type"] == "sample":
+                            elif data_batch_plate_mode == 'for':
                                 j = site['cond_indep_stack'][data_batch_plate_id].counter - 1
                                 if self.vectorize_particles:
                                     log_joints[:, j] = log_joints[:, j] + sum_except_first_n_dims(site['log_prob'], 1)
                                 else:
                                     log_joints[i, j] = log_joints[i, j] + sum_except_first_n_dims(site['log_prob'], 0)
 
-                        for _, site in guide_trace.nodes.items():
-                            if site["type"] == "sample":
+                    for _, site in guide_trace.nodes.items():
+                        if site["type"] == "sample":
+                            if data_batch_plate_mode == 'with':
+                                if self.vectorize_particles:
+                                    log_qs = log_qs + sum_except_first_n_dims(site['log_prob'], 2)
+                                else:
+                                    log_qs[i] = log_qs[i] + sum_except_first_n_dims(site['log_prob'], 1)
+                            elif data_batch_plate_mode == 'for':
                                 j = site['cond_indep_stack'][data_batch_plate_id].counter - 1
                                 if self.vectorize_particles:
                                     log_qs[:, j] = log_qs[:, j] + sum_except_first_n_dims(site['log_prob'], 1)
